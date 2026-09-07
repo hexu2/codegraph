@@ -1613,10 +1613,17 @@ export class TreeSitterExtractor {
 
     // Push to stack and visit body
     this.nodeStack.push(funcNode.id);
-    const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
-      ?? getChildByField(node, this.extractor.bodyField);
-    if (body) {
-      this.visitFunctionBody(body, funcNode.id);
+    const bodyNodes = this.extractor.resolveBodyNodes?.(node);
+    if (bodyNodes) {
+      for (const bodyNode of bodyNodes) {
+        this.visitFunctionBody(bodyNode, funcNode.id);
+      }
+    } else {
+      const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
+        ?? getChildByField(node, this.extractor.bodyField);
+      if (body) {
+        this.visitFunctionBody(body, funcNode.id);
+      }
     }
     this.nodeStack.pop();
   }
@@ -1833,10 +1840,17 @@ export class TreeSitterExtractor {
 
     // Push to stack and visit body
     this.nodeStack.push(methodNode.id);
-    const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
-      ?? getChildByField(node, this.extractor.bodyField);
-    if (body) {
-      this.visitFunctionBody(body, methodNode.id);
+    const bodyNodes = this.extractor.resolveBodyNodes?.(node);
+    if (bodyNodes) {
+      for (const bodyNode of bodyNodes) {
+        this.visitFunctionBody(bodyNode, methodNode.id);
+      }
+    } else {
+      const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
+        ?? getChildByField(node, this.extractor.bodyField);
+      if (body) {
+        this.visitFunctionBody(body, methodNode.id);
+      }
     }
     this.nodeStack.pop();
   }
@@ -1895,7 +1909,8 @@ export class TreeSitterExtractor {
     // Skip forward declarations and type references (no body = not a definition)
     // — EXCEPT C# positional records (`record struct M(decimal Amount);`),
     // complete definitions with no body block. (#831)
-    const body = getChildByField(node, this.extractor.bodyField);
+    const body = this.extractor.resolveBody?.(node, this.extractor.bodyField)
+      ?? getChildByField(node, this.extractor.bodyField);
     if (!body && node.type !== 'record_declaration') return;
 
     const name = extractName(node, this.source, this.extractor);
@@ -5198,6 +5213,17 @@ export class TreeSitterExtractor {
 
     const visitForCallsAndStructure = (node: SyntaxNode): void => {
       const nodeType = node.type;
+
+      if (this.extractor!.visitFunctionBodyNode) {
+        const handled = this.extractor!.visitFunctionBodyNode(
+          node,
+          this.makeExtractorContext(),
+        );
+        if (handled) {
+          this.scanFnRefSubtree(node, 0);
+          return;
+        }
+      }
 
       // Function-as-value capture (#756) — function bodies are walked here,
       // not in visitNode, so the capture hook must fire in both walkers.

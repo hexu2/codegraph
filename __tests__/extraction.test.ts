@@ -8550,6 +8550,292 @@ local function run(y) return helper(y) end
 });
 
 // =============================================================================
+// Julia (tree-sitter-julia WASM vendored; extends colbymchenry/codegraph#244)
+// =============================================================================
+
+describe('Julia Extraction', () => {
+  describe('Language detection', () => {
+    it('should detect Julia files', () => {
+      expect(detectLanguage('main.jl')).toBe('julia');
+      expect(detectLanguage('graph_utils.jl')).toBe('julia');
+    });
+
+    it('should report Julia as supported', () => {
+      expect(isLanguageSupported('julia')).toBe(true);
+      expect(getSupportedLanguages()).toContain('julia');
+    });
+  });
+
+  describe('Function extraction', () => {
+    it('should extract top-level function definitions', () => {
+      const code = `
+function greet(name::String)
+  println("Hello")
+end
+
+function add(a::Int, b::Int)::Int
+  return a + b
+end
+`;
+      const result = extractFromSource('utils.jl', code);
+      const fns = result.nodes.filter((n) => n.kind === 'function');
+      expect(fns.find((f) => f.name === 'greet')).toBeDefined();
+      expect(fns.find((f) => f.name === 'add')).toBeDefined();
+    });
+
+    it('should extract function signature', () => {
+      const code = `
+function process(x::Int, y::Float64)::String
+  return string(x + y)
+end
+`;
+      const result = extractFromSource('process.jl', code);
+      const fn = result.nodes.find((n) => n.kind === 'function' && n.name === 'process');
+      expect(fn).toBeDefined();
+      expect(fn?.signature).toContain('x::Int');
+    });
+
+    it('should extract macro definitions', () => {
+      const code = `
+macro mytime(expr)
+  return :(0)
+end
+`;
+      const result = extractFromSource('macros.jl', code);
+      const macroFn = result.nodes.find((n) => n.kind === 'function' && n.name === 'mytime');
+      expect(macroFn).toBeDefined();
+    });
+
+    it('should extract one-line assignment functions', () => {
+      const code = 'has_key(d, k) = (k in keys(d))';
+      const result = extractFromSource('short.jl', code);
+      expect(result.nodes.find((n) => n.name === 'has_key' && n.kind === 'function')).toBeDefined();
+    });
+
+    it('should extract Polaris typed, where, and macro-wrapped short functions', () => {
+      const code = `
+typed_value(x)::Int = convert_value(x)
+generic_value(x::T)::T where T = normalize_value(x)
+@inline inline_value(x)::Int = fast_value(x)
+Base.@propagate_inbounds Base.getindex(value::Thing, i...) = lookup_value(value, i...)
+`;
+      const result = extractFromSource('short_forms.jl', code);
+      const functions = new Map(
+        result.nodes
+          .filter((n) => n.kind === 'function')
+          .map((n) => [n.name, n]),
+      );
+      expect(functions.get('typed_value')?.signature).toBe('(x)::Int');
+      expect(functions.get('generic_value')?.signature).toBe('(x::T)::T where T');
+      expect(functions.get('inline_value')?.signature).toBe('(x)::Int');
+      expect(functions.get('getindex')?.signature).toBe('(value::Thing, i...)');
+
+      const calls = result.unresolvedReferences
+        .filter((r) => r.referenceKind === 'calls')
+        .map((r) => r.referenceName);
+      expect(calls).toEqual(expect.arrayContaining([
+        'convert_value',
+        'normalize_value',
+        'fast_value',
+        'lookup_value',
+      ]));
+      expect(calls).not.toEqual(expect.arrayContaining([
+        '@inline',
+        '@propagate_inbounds',
+        'Base',
+        'typed_value',
+        'generic_value',
+      ]));
+    });
+
+    it('should keep nested long and short function calls in their own scopes', () => {
+      const code = `
+@inline function outer(x)
+  function inner(y)::Int
+    return nested_call(y)
+  end
+  local_helper(y) = local_call(y)
+  return inner(x) + local_helper(x)
+end
+`;
+      const result = extractFromSource('nested.jl', code);
+      const outer = result.nodes.find((n) => n.kind === 'function' && n.name === 'outer');
+      const inner = result.nodes.find((n) => n.kind === 'function' && n.name === 'inner');
+      const local = result.nodes.find((n) => n.kind === 'function' && n.name === 'local_helper');
+      expect(outer).toBeDefined();
+      expect(inner).toBeDefined();
+      expect(local).toBeDefined();
+
+      expect(result.unresolvedReferences).toContainEqual(
+        expect.objectContaining({
+          fromNodeId: inner?.id,
+          referenceKind: 'calls',
+          referenceName: 'nested_call',
+        }),
+      );
+      expect(result.unresolvedReferences).toContainEqual(
+        expect.objectContaining({
+          fromNodeId: local?.id,
+          referenceKind: 'calls',
+          referenceName: 'local_call',
+        }),
+      );
+      expect(
+        result.unresolvedReferences.some(
+          (r) =>
+            r.referenceKind === 'calls' &&
+            (r.referenceName === '@inline' || r.referenceName === 'outer'),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe('Struct and abstract extraction', () => {
+    it('should extract struct definitions without block wrapper', () => {
+      const code = `
+struct Point
+ x::Float64
+ y::Float64
+end
+
+mutable struct Counter
+ value::Int
+end
+`;
+      const result = extractFromSource('types.jl', code);
+      const structs = result.nodes.filter((n) => n.kind === 'struct');
+      expect(structs.find((s) => s.name === 'Point')).toBeDefined();
+      expect(structs.find((s) => s.name === 'Counter')).toBeDefined();
+      expect(result.nodes.find((n) => n.kind === 'field' && n.name === 'x')).toBeDefined();
+      expect(result.nodes.find((n) => n.kind === 'field' && n.name === 'value')).toBeDefined();
+    });
+
+    it('should extract abstract type definitions', () => {
+      const code = `
+abstract type Animal end
+abstract type Shape end
+`;
+      const result = extractFromSource('abstract.jl', code);
+      const abstracts = result.nodes.filter((n) => n.kind === 'interface');
+      expect(abstracts.find((a) => a.name === 'Animal')).toBeDefined();
+      expect(abstracts.find((a) => a.name === 'Shape')).toBeDefined();
+    });
+  });
+
+  describe('Module extraction', () => {
+    it('should extract module and nested definitions', () => {
+      const code = `
+module SampleGraph
+export greet
+
+function greet(name::String)
+  println("Hello")
+end
+end
+`;
+      const result = extractFromSource('mymodule.jl', code);
+      expect(result.nodes.find((n) => n.kind === 'module' && n.name === 'SampleGraph')).toBeDefined();
+      expect(
+        result.nodes.find(
+          (n) => (n.kind === 'function' || n.kind === 'method') && n.name === 'greet'
+        )
+      ).toBeDefined();
+    });
+  });
+
+  describe('Import extraction', () => {
+    it('should extract import and using statements', () => {
+      const code = `
+import LinearAlgebra
+import Base.Math: sin, cos
+using Statistics
+using DataFrames: DataFrame
+`;
+      const result = extractFromSource('imports.jl', code);
+      const imports = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(imports).toContain('LinearAlgebra');
+      expect(imports).toContain('Statistics');
+    });
+
+    it('should extract every module in a multi-module using statement', () => {
+      const result = extractFromSource('multi_imports.jl', `
+using CSV, DataFrames, Dates
+using Foo: alpha, beta
+`);
+      const imports = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(imports).toEqual(expect.arrayContaining([
+        'CSV',
+        'DataFrames',
+        'Dates',
+        'Foo',
+      ]));
+    });
+  });
+
+  describe('Constant and enum extraction', () => {
+    it('should extract Polaris constants and initializer calls', () => {
+      const result = extractFromSource('constants.jl', `
+const CACHE = Ref(1)
+const KEY::String = "polaris"
+`);
+      const cache = result.nodes.find((n) => n.kind === 'constant' && n.name === 'CACHE');
+      expect(cache).toBeDefined();
+      expect(result.nodes.find((n) => n.kind === 'constant' && n.name === 'KEY')).toBeDefined();
+      expect(result.unresolvedReferences).toContainEqual(
+        expect.objectContaining({
+          fromNodeId: cache?.id,
+          referenceKind: 'calls',
+          referenceName: 'Ref',
+        }),
+      );
+    });
+
+    it('should extract block and one-line @enum declarations with members', () => {
+      const result = extractFromSource('enums.jl', `
+@enum VariableVtype begin
+  FORMULA
+  TABLE = 2
+  GOAL_SEEK
+end
+@enum GenerationStrategy ArrayStrategy DictStrategy
+`);
+      const enums = result.nodes.filter((n) => n.kind === 'enum').map((n) => n.name);
+      const members = result.nodes.filter((n) => n.kind === 'enum_member').map((n) => n.name);
+      expect(enums).toEqual(expect.arrayContaining(['VariableVtype', 'GenerationStrategy']));
+      expect(members).toEqual(expect.arrayContaining([
+        'FORMULA',
+        'TABLE',
+        'GOAL_SEEK',
+        'ArrayStrategy',
+        'DictStrategy',
+      ]));
+      expect(
+        result.unresolvedReferences.some(
+          (r) => r.referenceKind === 'calls' && r.referenceName === '@enum',
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe('Call extraction', () => {
+    it('should extract function calls inside bodies without block', () => {
+      const code = `
+function run(g)
+  out_neighbors(g, v)
+  sorted = topological_sort(cons)
+end
+`;
+      const result = extractFromSource('run.jl', code);
+      const calls = result.unresolvedReferences
+        .filter((r) => r.referenceKind === 'calls')
+        .map((r) => r.referenceName);
+      expect(calls).toContain('out_neighbors');
+      expect(calls).toContain('topological_sort');
+    });
+  });
+});
+
+// =============================================================================
 // Luau (typed superset of Lua — https://luau.org)
 // =============================================================================
 

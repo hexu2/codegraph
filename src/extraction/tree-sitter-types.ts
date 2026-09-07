@@ -197,6 +197,13 @@ export interface LanguageExtractor {
   visitNode?: (node: SyntaxNode, ctx: ExtractorContext) => boolean;
 
   /**
+   * Custom visitor for nodes encountered while walking a function body.
+   * Return true when the hook consumed the subtree. This covers languages whose
+   * nested declarations do not use the grammar's normal function node types.
+   */
+  visitFunctionBodyNode?: (node: SyntaxNode, ctx: ExtractorContext) => boolean;
+
+  /**
    * Synthesize members that exist at compile time but not in the source AST,
    * called at the end of class extraction with the class still on the scope
    * stack (so `ctx.createNode` attaches containment + qualified names) and the
@@ -230,6 +237,12 @@ export interface LanguageExtractor {
    * (e.g. Dart puts function_body as a sibling, not a child.)
    */
   resolveBody?: (node: SyntaxNode, bodyField: string) => SyntaxNode | null;
+
+  /**
+   * Resolve multiple body roots when a grammar stores function statements as
+   * direct declaration children instead of wrapping them in one body node.
+   */
+  resolveBodyNodes?: (node: SyntaxNode) => SyntaxNode[] | null;
 
   /**
    * Extract import information from an import node.
